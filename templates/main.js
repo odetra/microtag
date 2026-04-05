@@ -2,7 +2,7 @@ import { DB } from "./db.js";
 
 // Configs and options.
 const ENABLE_POSTS=0; // If post title and commentary appears or not.
-const POSTS_PER_PAGE=25; // How many images appears in each page.
+const POSTS_PER_PAGE=15; // How many images appears in each page.
 const SHOW_TITLES_IN_GALLERY=0; // If post title is shown in gallery.
 
 // Gallery/Search.

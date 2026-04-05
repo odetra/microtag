@@ -10,7 +10,19 @@ readonly WEB="$MT_ROOT_DIR/web";
 # Some configs. 
 readonly THUMBNAIL_SIZE="200";
 # HTML Ok, but double quotes break things. 
-readonly HOME_MESSAGE=""; 
+readonly HOME_MESSAGE="<h2>Hello!</h2><br>\
+  <img src='./files/0dfa23762e6fd31c13ebeeecd9941a44.webp'/><br>\
+  <p>\
+  This page is a demo for Microtag, which is a very simple shell script that generates a booru-like static website.<br>\
+  It may be useful for creating galleries in platforms like neocities.org or github.io, where you don't have backend.<br>\
+  This script is for small galleries, like hundreds, maybe a few thousands of files. For a lot of thousands of files it will be slow.<br>\
+  Remember: it's just bash. A dirty and quick makeshift solution.<br>\
+  This gallery contains some files I scrapped randomly and blindly for demonstration.<br>\
+  <br>\
+  <a href='https://odetra.neocities.org'>Made (for fun) by me, Odetra.</a>\
+  <br>\
+  </p>\
+"; 
 
 # Deps.
 require() {
