@@ -1,0 +1,540 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Directories.
+readonly MT_ROOT_DIR="$HOME/.local/share/microtag";
+readonly DB="$MT_ROOT_DIR/microtag.db";
+readonly IMPORT_DIR="/tmp/microtag-import";
+readonly WEB="$MT_ROOT_DIR/web";
+
+# Some configs. 
+readonly THUMBNAIL_SIZE="200";
+# HTML Ok, but double quotes break things. 
+readonly HOME_MESSAGE=""; 
+
+# Deps.
+require() {
+  command -v "$1" &> /dev/null \
+    err "The package $1 is required. Please install it.";
+}
+
+# Title Message.
+fmsg() {
+  local title="$1";
+  shift;
+  echo -e "\e[32;1m[$title]\e[0m $*";
+}
+
+# Indented message.
+msg() {
+  echo -e "  \e[32;1m|\e[0m  $*";
+}
+
+err() {
+  echo -e "  \e[31;1m|\e[0m  $*" >&2;
+  exit 1;
+}
+
+# Starts a time measurement. 
+tookStart() {
+  TOOK_START="$(date '+%s')";
+} 
+
+# Ends a time measurement. 
+took() {
+  local took_end;
+  took_end="$(date '+%s')";
+  local took="$(( took_end - TOOK_START ))";
+  msg "Took ${took}s."
+}
+
+# Updates website and scripts.
+# They are copied from template directory.
+buildWebsite(){
+  # Check if you are running from microtag directory.
+  [[ -d "./templates" ]] \
+    || err 'Directory "templates" not found. Are you running from the right path?';
+  
+  tookStart;
+  # Copy templates to the generated web site.
+  cat "./templates/index.html" > "$WEB/index.html" \
+    && cat "./templates/style.css" > "$WEB/style.css" \
+    && cat "./templates/main.js" > "$WEB/main.js" \
+    && msg "Templates copied.";
+  took;
+
+  # Update DB.
+  tookStart;
+  mkDB > "$WEB"/db.js && msg "JS database and tags uploaded.";
+  took;
+}
+
+
+# Makes a new entry to be inserted into the final JSON file.
+mkEntry() {
+  local md5="$1"; # This is the original md5, before conversion.
+  local ext="$2";
+  local filename="$3";
+  local filesize="$4";
+  local title="$5";
+  local commentary="$6";
+  local timestamp="$7";
+  local tags="$8";
+  readarray -t arr_tags < <(tr ' ' '\n' <<< "$tags")
+
+  # Quote tags for json.
+  qtags="$(for word in "${arr_tags[@]}";
+    do printf '"%s" ' "$word"; done)";
+
+  # Returns json entry.
+  echo -e  "{ md5: \"$md5\", ext: \"$ext\", filename:\
+    \"$filename\", filesize: \"$filesize\", timestamp:\
+    \"$timestamp\", title: \"$title\", commentary: \
+    \"$commentary\", tags: [ \"*\", ${qtags// /, }] },";
+}
+
+# Gets a field from a item in DB.
+# This is dirty, I started with
+# a raw text DB, then changed into
+# sqlite and I am too lazy for 
+# changing those functions.
+# Yes, if there is a tab in any if 
+# those fields things will go bad...
+getField() {
+  local field="$1";
+  local item="$2";
+
+  case "$field" in
+    --md5) cut -f1 <<< "$item" ;;
+    --ext) cut -f2 <<< "$item" ;;
+    --filename) cut -f3 <<< "$item" ;;
+    --filesize) cut -f4 <<< "$item" ;;
+    --title) cut -f5 <<< "$item" ;;
+    --commentary) cut -f6 <<< "$item" ;;
+    --timestamp) cut -f7 <<< "$item" ;;
+    --tags) cut -f8 <<< "$item" ;;
+  esac
+}
+
+# Make all the entries for the JSON final file.
+mkEntries() {
+  readarray -t entries < <(sqlite3 -separator $'\t' "$DB" "SELECT * FROM files ORDER BY timestamp DESC;");
+  for item in "${entries[@]}"; do
+    local md5 ext filename filesize title \
+      commentary timestamp tags;
+    md5="$(getField --md5 "$item")";
+    ext="$(getField --ext "$item")";
+    filename="$(getField --filename "$item")";
+    filesize="$(getField --filesize "$item")";
+    title="$(getField --title "$item")";
+    commentary="$(getField --commentary "$item")";
+    timestamp="$(getField --timestamp "$item")";
+    tags="$(getField --tags "$item")";
+    mkEntry "$md5" "$ext" "$filename" "$filesize" "$title" "$commentary" "$timestamp" "$tags";
+  done
+}
+
+# Make the storage footer, it goes in the JSON.
+storage() {
+  # Storage and file numbers.
+  local disk entries;
+  disk="$(du -h "$WEB" -d 0 | cut -f1)";
+  entries="$(ls "$WEB"/files | wc -l | cut -d' ' -f1)";
+
+  # Print.
+  echo -e "Currently serving ${entries:-0} files. Using $disk of disk space." | tr '\n' ' ';
+}
+
+# Make a list with all tags used.
+# This is useful for tags search previews.
+getTags() {
+  local all_tags;
+  all_tags="$(sqlite3 "$DB" "SELECT tags FROM files;")";
+
+  # Quote.
+  readarray -t arr_all_tags < <(tr ' ' '\n' <<< "$all_tags" | sed '/^$/d' | sort -u);
+  qall_tags="$(for word in "${arr_all_tags[@]}"; do printf '"%s", ' "$word"; done)";
+
+  # Return the sorted and uniqued(?) tags.
+  echo -e "$qall_tags";
+}
+
+# Finally, generate the JSON file content.
+# Yes, I know it is not a JSON.
+# No, I don't care.
+mkDB() {
+  cat << EOF
+export const DB = {
+  info: {
+    updated_at: "$(date)",
+    homeMsg: "$HOME_MESSAGE",
+    storageMsg: "$(storage)",
+    tags: [$(getTags)],
+  },
+  files: [
+    $(mkEntries)
+  ]
+};
+EOF
+}
+
+# This creates the DB file and table
+# on the first import.
+createDB() {
+  sqlite3 "$DB" "
+    CREATE TABLE files (
+      sha TEXT PRIMARY KEY,
+      ext TEXT NOT NULL,
+      filename TEXT,
+      filesize TEXT NOT NULL,
+      title TEXT,
+      commentary TEXT,
+      timestamp TEXT NOT NULL,
+      tags TEXT NOT NULL
+    ); 
+  "; 
+}
+
+# This escapes quotes to avoid sqlite issues.
+escapeQuotes() {
+  echo "${1//\'/\'\'}";
+}
+
+# It checks if a row exists in DB.
+checkIfExists() {
+  # Check if PK exists.
+  local pk_exists sha;
+  sha="$1";
+  pk_exists=$(sqlite3 "$DB" "SELECT 1 FROM files WHERE sha='$sha' LIMIT 1;");
+
+  # Return.
+  if (("$pk_exists")); then
+    return 1;
+  else
+    return 0;
+  fi
+}
+
+# Select all entries with some tag.
+# Their md5s are printed and can be feed
+# to others microtag options, like --delete
+# for a mass deletation.
+selectByTag() {
+  local tag="$1";
+  sqlite3 "$DB" "
+    SELECT sha FROM files
+    WHERE' ' || tags || ' ' LIKE '% $tag %';
+  ";
+}
+
+# This updates column title from rows.
+update() {
+  local column="$1";
+  shift;
+
+  # What column to update?
+  case "$column" in
+    --title) column='title' ;;
+    --commentary) column='commentary' ;;
+    --tags) column='tags' ;;
+    *) err "Invalid column." ;;
+  esac
+
+  local new_data="$*";
+  fmsg "Updating: $column ";
+  tookStart;
+  while read -r sha; do
+    local old_data;
+    # Get file old data.
+    old_data="$(sqlite3 "$DB" "
+      SELECT $column FROM files
+      WHERE sha LIKE '$sha';")";
+
+    # Check if it returned any data.
+    [[ -n "$old_data" ]] || {
+      msg "$sha: Not found in database.";
+      continue;
+    }
+
+    # Update.
+    sqlite3 "$DB" "
+      UPDATE files
+      SET $column = '$new_data'
+      WHERE sha LIKE '$sha';"
+
+    # Done.
+    msg "Updating: $sha";
+    msg "Old data: $old_data";
+    msg "New data: $new_data";
+  done
+  took;
+}
+
+# This deletes rows from database.
+# Also removes the files. 
+deletePosts() {
+  fmsg "Deleting";
+  tookStart;
+  local startStorage endStorage;
+  startStorage="$(du -sh "$WEB" | cut -f1)";
+  while read -r sha; do
+    # Not the more efficient way, but whatever.
+    # I am feeling lazy.
+    local filepath;
+    # Get file path.
+    filepath="$(sqlite3 "$DB" "
+      SELECT sha || '.' || ext AS fullname FROM files
+      WHERE sha LIKE '$sha';")";
+
+    # Check if it returned any filepath.
+    [[ -n "$filepath" ]] || {
+      msg "$sha: Not found in database.";
+      continue;
+    }
+
+    # Remove row from DB.
+    sqlite3 "$DB" "
+      DELETE FROM files
+      WHERE sha = '$sha';" || {
+      msg "Could not remove $sha from database.";
+      continue;
+    };
+    
+    # Delete the file and thumb.
+    rm "$WEB/files/$filepath";
+    rm "$WEB/thumbs/$sha.webp"; # Thumbs are webp.
+
+    # Done.
+    msg "Deleted: $sha";
+  done
+  endStorage="$(du -sh "$WEB" | cut -f1)";
+  msg "$startStorage → $endStorage";
+  took;
+}
+
+# Adds a new row in the DB for the imported file.
+importSql() {
+  local sha ext filename filesize title commentary timestamp tags;
+  sha="$(escapeQuotes "$1")";
+  ext="$(escapeQuotes "$2")";
+  filename="$(escapeQuotes "$3")";
+  filesize="$(escapeQuotes "$4")";
+  title="$(escapeQuotes "$5")";
+  commentary="$(escapeQuotes "$6")";
+  timestamp="$(escapeQuotes "$7")";
+  tags="$(escapeQuotes "$8")";
+
+  # Insert.
+  sqlite3 "$DB" "
+    INSERT INTO files (
+      sha, 
+      ext, 
+      filename,
+      filesize,
+      title,
+      commentary,
+      timestamp,
+      tags
+    )
+    VALUES (
+      '$sha',
+      '$ext',
+      '$filename',
+      '$filesize',
+      '$title',
+      '$commentary',
+      '$timestamp',
+      '$tags'
+    );";
+}
+
+# Import everything from the import directory.
+bulkImport() {
+  if ls "$IMPORT_DIR" &> /dev/null; then 
+    # Check if DB exists.
+    # Creates if not.
+    [[ -f "$DB" ]] || createDB;
+
+    fmsg "Looking for new files...";
+
+    # Load the files.
+    readarray -t files_arr < <(find "$IMPORT_DIR" -name '*.tags')
+    for file in "${files_arr[@]}"; do
+      # Assume file from .tag file.
+      file_name="${file%.tags}";
+
+      # Make md5 digest.
+      sha="$(md5sum < "$file_name" | cut -d' ' -f1)";
+  
+      # Check if exists in db.
+      # This won't check the built website!
+      checkIfExists "$sha" || continue;      
+ 
+      # Filename for CLI output.
+      local orig_filesize base_name;
+      orig_filesize="$(du -h "$file_name" | cut -f 1)";
+      base_name="$(basename "$file_name")";
+      local nickname="${base_name:0:10}...${base_name: -10}";
+      fmsg "$nickname / $orig_filesize";
+      
+      # Load tags from .tag file.
+      file_tags="$(tr '\n' ' ' < "$file" | sed -n '1p')";
+  
+      # Get extension and import.
+      case "$file_name" in
+        *.jpeg | *.jpg | *.png | *.webp) # Will be converted to webp.
+          ext='webp';
+
+          msg "Converting to $ext and copying...";
+          tookStart;
+          magick "$file_name" "$WEB/files/$sha.$ext" &> /dev/null;
+          took;
+
+          msg "Creating thumb...";
+          tookStart;
+          magick "$file_name" -thumbnail "$THUMBNAIL_SIZE"x"$THUMBNAIL_SIZE" "$WEB/thumbs/$sha.webp" &> /dev/null;
+          took;
+        ;;
+        *.webm | *.mp4)
+          ext='webm';
+
+          msg "Copying file...";
+          tookStart;
+          cp "$file_name" "$WEB/files/$sha.$ext" &> /dev/null;
+          took;
+
+          msg "Creating thumb...";
+          tookStart;
+          ffmpeg -y -ss 00:00:00 -i "$file_name" -frames:v 1 -vf "scale=$THUMBNAIL_SIZE:-1" "$WEB/thumbs/$sha.webp" &> /dev/null;
+          took;
+        ;;
+        *.gif) # Stupid gifs, why the fuck people still use this?
+          ext='webp';
+          msg "Converting to $ext and copying...";
+          tookStart;
+          ffmpeg -y -i "$file_name" -loop 0 "$WEB/files/$sha.$ext" &> /dev/null;
+          took;
+
+          msg "Creating thumb...";
+          tookStart;
+          #magick "$WEB/files/$sha.$ext" -coalesce -resize 200x200 "$WEB/thumbs/$sha.webp" &> /dev/null;
+          #ffmpeg -y -i "$WEB/files/$sha.$ext" -vf "scale=200:-1:flags=lanczos" -loop 0 "$WEB/thumbs/$sha.webp" &> /dev/null;
+          #magick "$WEB/files/$sha.$ext" -coalesce -resize 200x200 "$WEB/thumbs/$sha.webp" &> /dev/null;
+          ffmpeg -y -i "$file_name" -vf "fps=10,scale=$THUMBNAIL_SIZE:-1:flags=lanczos" \
+            -c:v libwebp -lossless 0 -q:v 25 -loop 0 "$WEB/thumbs/$sha.webp" &> /dev/null;
+          took;
+        ;;
+        *) # Don't support other filetypes for now...
+          msg "Unsupported file type." ;
+          continue;
+        ;;
+      esac 
+
+      # Show initial and final filesizes
+      # so you can see how superior webp are to gifs.
+      local final_filesize;
+      final_filesize="$(du -h "$WEB/files/$sha.$ext" | cut -f 1)";
+      msg "$orig_filesize → $final_filesize/$ext";
+
+      # Metadata...
+      local filename="null"; # Avoid saving original filename for privacy.
+      local filesize timestamp;
+      filesize="$(du -h "$WEB/files/$sha.$ext" | cut -f 1)";
+      timestamp="$(date '+%Y-%m-%d %H:%M:%S')";
+      local title='Untitled.';
+      local commentary='No commentary.';
+
+      # Make tags ordered, remove duplicates and add ext to it.
+      # Also, remove problematic characters.
+      file_tags="$file_tags $ext";
+      local tags;
+      tags="$(tr -s ' ' <<< "$file_tags" \
+        | sort -u)";
+  
+      # Import into DB.
+      importSql "$sha" "$ext" "$filename" "$filesize" "$title" "$commentary" "$timestamp" "$tags"; 
+    done
+  else
+    msg "No files."
+  fi
+}
+
+main() {
+  local OP="$1";
+
+  require 'find';
+  require 'ffmpeg';
+  require 'magick';
+  require 'sqlite3';
+
+  # Create directory structure if not exists.
+  [[ -d "$IMPORT_DIR" ]] || mkdir -p "$IMPORT_DIR";
+  [[ -d "$WEB/thumbs" ]] || mkdir -p "$WEB/thumbs";
+  [[ -d "$WEB/files" ]]  || mkdir -p "$WEB/files";
+
+  # What to do?
+  case "$OP" in
+    # Prepare .tag files for all files in the import directory.
+    # It takes common tags as args.
+    # Just a quick and dirty easy way to help with the .tags files.
+    --prepare) 
+      fmsg "Microtag";
+      shift;
+      local tags="$*";
+      for file in "$IMPORT_DIR/"*; do 
+        if [[ "${file: -5}" != '.tags' ]]; then
+          echo -ne "$tags" >> "$file.tags"; 
+        fi
+      done 
+      msg "Created *.tag files.";
+    ;;
+    
+    # Import everything in the import directory
+    # using its .tags file. 
+    --import) 
+      shift; 
+      bulkImport "$@";
+    ;;
+    
+    # Clears the import directory. Caution here.
+    --clear-import-directory) 
+      fmsg "Microtag";
+      rm "$IMPORT_DIR"/* \
+        && msg "Import directory cleared.";
+    ;;
+
+    # Recompile website css, html and js.
+    --build) 
+      fmsg "Building";
+      buildWebsite;
+    ;;
+
+    # Get posts with that tag.
+    --select-by-tag) 
+      selectByTag "$2";
+    ;;
+
+    # Update some column.
+    # You can update title, commentary and tags.
+    --update) 
+      shift;
+      update "$@";
+    ;;
+
+    # Delete posts. Caution with mass deletations.
+    --delete) 
+      deletePosts;
+    ;;
+
+    # Starts a python server. Takes localhost or a IP as arg.
+    --server) 
+      cd "$WEB";
+      python3 -m http.server -b "${2:-localhost}" 8000; 
+    ;;
+
+    # Invalid operation warning.
+    *) fmsg "Microtag"; err "Invalid argument."; ;;
+  esac
+}
+
+main "$@";
