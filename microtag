@@ -233,7 +233,7 @@ checkIfExists() {
 # for a mass deletation.
 selectByTag() {
   local tag="$1";
-  sqlite3 "$DB" "
+  sqlite3 -cmd ".mode list" "$DB" "
     SELECT sha FROM files
     WHERE' ' || tags || ' ' LIKE '% $tag %';
   ";
