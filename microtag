@@ -27,7 +27,7 @@ readonly HOME_MESSAGE="<h2>Hello!</h2><br>\
 # Deps.
 require() {
   command -v "$1" &> /dev/null \
-    err "The package $1 is required. Please install it.";
+    || err "The package $1 is required. Please install it.";
 }
 
 # Title Message.
